@@ -2,7 +2,7 @@
 set -e
 
 exec uv run python src/wyoming_thai_vits.py \
-  --log-level "${WY_LOG_LEVEL}" \
-  --host "${WY_HOST}" \
-  --port "${WY_PORT}" \
-  --model-id "${WY_MODEL}"
+  --log-level "${THTTS_LOG_LEVEL}" \
+  --host "${THTTS_HOST}" \
+  --port "${THTTS_PORT}" \
+  --model-id "${THTTS_MODEL}"

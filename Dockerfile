@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tini curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh -s -- --yes --bin-dir /usr/local/bin
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh -s -- --bin-dir /usr/local/bin
 
 WORKDIR /app
 

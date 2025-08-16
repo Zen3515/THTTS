@@ -1,10 +1,11 @@
 FROM python:3.10-slim AS base
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    tini curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+# COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.8.11 /uv /uvx /bin/
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh -s -- --bin-dir /usr/local/bin
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tini ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

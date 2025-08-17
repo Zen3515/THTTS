@@ -15,7 +15,7 @@ set -Eeuo pipefail
 : "${THTTS_DEVICE:=auto}"           # auto|cpu|cuda
 : "${THTTS_SPEED:=1.0}"
 : "${THTTS_NFE_STEPS:=32}"
-: "${THTTS_MAX_CONCURRENT:=2}"
+: "${THTTS_MAX_CONCURRENT:=1}"
 : "${THTTS_CKPT_FILE:=}"            # optional override
 : "${THTTS_VOCAB_FILE:=}"           # optional override
 

@@ -1,40 +1,4 @@
 #!/usr/bin/env python3
-import argparse
-import asyncio
-import logging
-import re
-import os
-from typing import List
-import numpy as np
-
-# ---- Wyoming imports (official lib) ----
-from wyoming.event import Event
-from wyoming.server import AsyncEventHandler, AsyncServer
-
-from wyoming.tts import (
-    Synthesize,
-    SynthesizeStart,
-    SynthesizeChunk,
-    SynthesizeStop,
-    SynthesizeStopped,
-)
-
-from wyoming.audio import (
-    AudioStart,
-    AudioChunk,
-    AudioStop,
-)
-
-from wyoming.info import Info, Describe, TtsProgram, TtsVoice, Attribution
-from wyoming.error import Error
-
-# ---- F5-TTS (Thai) imports ----
-import torch
-from importlib.resources import files
-from cached_path import cached_path
-from omegaconf import OmegaConf
-
-from f5_tts.model import DiT
 from f5_tts.infer.utils_infer import (
     mel_spec_type,             # "vocos" (24 kHz)
     target_rms,
@@ -49,6 +13,38 @@ from f5_tts.infer.utils_infer import (
     load_vocoder,
     preprocess_ref_audio_text,
 )
+from f5_tts.model import DiT
+from cached_path import cached_path
+import torch
+from wyoming.error import Error
+from wyoming.info import Info, Describe, TtsProgram, TtsVoice, Attribution
+from wyoming.audio import (
+    AudioStart,
+    AudioChunk,
+    AudioStop,
+)
+from wyoming.tts import (
+    Synthesize,
+    SynthesizeStart,
+    SynthesizeChunk,
+    SynthesizeStop,
+    SynthesizeStopped,
+)
+from wyoming.server import AsyncEventHandler, AsyncServer
+from wyoming.event import Event
+from pythainlp.tokenize import sent_tokenize
+import argparse
+import asyncio
+import logging
+from typing import List
+import numpy as np
+
+MIN_CHARS = 48          # flush when buffer reaches this length
+MAX_WAIT_MS = 220       # flush if idle for this many ms
+MAX_SENT_LEN = 180      # if a 'sentence' is too long, treat as complete to avoid stalling
+TERMINATORS = {"।", "?", "!", "…", "\n"}  # Thai often lacks punctuation; timeout/length still cover
+MIN_SENT_CHARS = 15     # do not emit a sentence shorter than this unless final flush
+
 
 # -----------------------
 # Utils
@@ -62,21 +58,68 @@ def float32_to_int16_pcm(x: np.ndarray) -> bytes:
 
 
 def split_sentences_th(text: str) -> List[str]:
-    parts = re.split(r'([.!?。\n])', text)
-    chunks, buf = [], ""
-    for p in parts:
-        if p is None:
-            continue
-        buf += p
-        if p in {".", "!", "?", "。", "\n"}:
-            s = buf.strip()
-            if s:
-                chunks.append(s)
-            buf = ""
-    tail = buf.strip()
-    if tail:
-        chunks.append(tail)
-    return [c for c in (s.strip() for s in chunks) if c]
+    splitted = sent_tokenize(text, keep_whitespace=False, engine="thaisum")
+    logging.debug(f"Splitted sentences to: len={len(splitted)} {splitted}")
+    return splitted
+
+
+def _split_ready_vs_tail(text: str, *, final: bool = False) -> tuple[list[str], str]:
+    """
+    Tokenize Thai into sentences and return (ready_sentences, tail_remainder).
+    Strategy:
+      - If >=2 sentences, treat all but the last as ready; keep last as tail.
+      - If only 1 sentence:
+          - If it ends with a terminator or is very long, treat as ready.
+          - Else keep as tail (incomplete).
+      - Additionally, never emit a ready sentence with length < MIN_SENT_CHARS
+        by coalescing it with the next sentence — unless final=True.
+    """
+    sents = split_sentences_th(text)
+    if not sents:
+        return [], ""
+
+    if len(sents) >= 2:
+        base = sents[:-1]
+        last = sents[-1]
+        # Coalesce short sentences in 'base' so we only emit items >= MIN_SENT_CHARS (unless final).
+        ready: list[str] = []
+        acc = ""
+        for s in base:
+            if not final and (len(s) < MIN_SENT_CHARS):
+                acc += s
+                if len(acc) >= MIN_SENT_CHARS:
+                    ready.append(acc)
+                    acc = ""
+            else:
+                if acc:
+                    # prefer to attach short acc to this sentence if it keeps it coherent
+                    merged = acc + s
+                    if not final and len(merged) < MIN_SENT_CHARS:
+                        acc = merged
+                    else:
+                        ready.append(merged)
+                        acc = ""
+                else:
+                    ready.append(s)
+        # Whatever remains in acc is too short; push it into the tail.
+        tail = (acc + last)
+        # If tail is obviously complete, we may emit it too.
+        if tail and (tail[-1] in TERMINATORS or len(tail) >= MAX_SENT_LEN or final):
+            if final or len(tail) >= MIN_SENT_CHARS:
+                ready.append(tail)
+                tail = ""
+        return ready, tail
+
+    # single sentence
+    s = sents[0]
+    if s and (s[-1] in TERMINATORS or len(s) >= MAX_SENT_LEN or final):
+        # Only emit if it's long enough, unless final=True
+        if final or len(s) >= MIN_SENT_CHARS:
+            return [s], ""
+        else:
+            # too short and not final → keep waiting
+            return [], s
+    return [], s
 
 
 # -----------------------
@@ -190,6 +233,8 @@ class ThaiF5Handler(AsyncEventHandler):
         self._streaming = False
         self.engine = engine
         self.sem = sem
+        self._buf: list[str] = []   # list of chunk strings
+        self._flush_task = None     # asyncio.Task or None
         peer = getattr(self, "writer", None)
         try:
             addr = peer.get_extra_info("peername") if peer else None
@@ -258,6 +303,7 @@ class ThaiF5Handler(AsyncEventHandler):
 
             if SynthesizeStart.is_type(event.type):
                 self._streaming = True
+                self._reset_buffer()
                 logging.info("Synthesize streaming START: %s", event)
                 return True
 
@@ -267,14 +313,31 @@ class ThaiF5Handler(AsyncEventHandler):
                 if not text:
                     logging.debug("Empty chunk")
                     return True
-                sents = split_sentences_th(text)
-                logging.info("Synthesize streaming CHUNK: %d sentences", len(sents))
-                for sentence in sents:
-                    await self._speak_text(sentence)
+
+                # Accumulate
+                self._buf.append(text)
+                buf_str = "".join(self._buf)
+                logging.debug("Accumulated chunk; buffer_len=%d (just got: %r)", len(buf_str), text)
+
+                # Peek at sentence segmentation to see if we have a *complete* sentence
+                sents = split_sentences_th(buf_str)
+                if len(sents) >= 2:
+                    # We have at least one complete sentence; flush the ready part(s) now
+                    await self._flush_buffer()
+                elif buf_str and buf_str[-1] in TERMINATORS:
+                    # Single sentence but explicitly terminated; safe to flush
+                    await self._flush_buffer()
+                else:
+                    # Still constructing the first/only sentence → do NOT flush now.
+                    # Re-arm the idle timer so we don't stall if the producer pauses.
+                    self._schedule_idle_flush()
+
                 return True
 
             if SynthesizeStop.is_type(event.type):
                 logging.info("Synthesize streaming STOP")
+                # Flush any remaining text first
+                await self._flush_buffer(force_all=True)
                 await self.write_event(SynthesizeStopped().event())
                 self._streaming = False
                 return True
@@ -294,6 +357,10 @@ class ThaiF5Handler(AsyncEventHandler):
             return
         rate, width, channels = self.engine.sr, 2, 1  # 16-bit, mono
         logging.debug("AudioStart: rate=%d width=%d channels=%d", rate, width, channels)
+        # Make sure no pending idle task fires mid-speak
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+            self._flush_task = None
         await self.write_event(AudioStart(rate=rate, width=width, channels=channels).event())
 
         loop = asyncio.get_running_loop()
@@ -311,10 +378,78 @@ class ThaiF5Handler(AsyncEventHandler):
         logging.info("Streamed audio: text_len=%d samples=%d bytes=%d",
                      len(text), len(wav), total_bytes)
 
+    def _reset_buffer(self):
+        self._buf = []
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+        self._flush_task = None
+        logging.debug("Resetted buffer")
 
-# -----------------------
-# Main
-# -----------------------
+    def _schedule_idle_flush(self):
+        # Cancel any previous idle flush task and schedule a new one
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+
+        self._flush_task = asyncio.create_task(self._idle_wait_and_flush())
+
+    async def _idle_wait_and_flush(self):
+        try:
+            await asyncio.sleep(MAX_WAIT_MS / 1000.0)
+            # Only flush if we truly have ready sentences; otherwise keep waiting.
+            if not self._buf:
+                return
+            buf_str = "".join(self._buf)
+            sents = split_sentences_th(buf_str)
+            if len(sents) >= 2 or (buf_str and buf_str[-1] in TERMINATORS) or len(buf_str) >= MAX_SENT_LEN:
+                await self._flush_buffer()
+            else:
+                # Not ready yet; re-arm the timer to check again later.
+                self._schedule_idle_flush()
+        except asyncio.CancelledError:
+            pass
+
+    async def _flush_buffer(self, force_all: bool = False):
+        """
+        Flush accumulated text:
+          - If force_all=True, synth everything in the buffer (no remainder).
+          - Else, synth only full sentences and keep tail remainder.
+        """
+        logging.debug(f"Flushing buffer force_all={force_all}")
+        if not self._buf:
+            return
+
+        buf_str = "".join(self._buf)
+        ready_sents: list[str]
+        tail: str
+
+        if force_all:
+            # Treat the entire buffer as ready (split just to get clean sentences)
+            # final=True allows emitting < MIN_SENT_CHARS at end of stream
+            ready_sents, tail = _split_ready_vs_tail(buf_str, final=True)
+            tail = ""  # by definition, final
+        else:
+            ready_sents, tail = _split_ready_vs_tail(buf_str, final=False)
+
+        if ready_sents:
+            logging.info("Flushing %d ready sentence(s)", len(ready_sents))
+            # Prevent a racing idle task from re-flushing the same sentences
+            if self._flush_task and not self._flush_task.done():
+                self._flush_task.cancel()
+                self._flush_task = None
+            # Move tail back to buffer BEFORE we speak, so any concurrent timer sees only the tail
+            self._buf = [tail] if tail else []
+            for sentence in ready_sents:
+                await self._speak_text(sentence)
+
+        else:
+            # No ready sentences; keep the current buffer as-is
+            pass
+
+        # If there is still a tail, keep the idle flush armed (so it won't stall forever)
+        if self._buf:
+            self._schedule_idle_flush()
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
@@ -329,7 +464,7 @@ async def main():
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--speed", type=float, default=default_speed, help="Speech speed multiplier.")
     ap.add_argument("--nfe-steps", type=int, default=nfe_step, help="Denoising steps.")
-    ap.add_argument("--max-concurrent", type=int, default=2)
+    ap.add_argument("--max-concurrent", type=int, default=1, help="Legacy params, do not change")
 
     ap.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = ap.parse_args()
@@ -351,7 +486,7 @@ async def main():
         speed=args.speed,
         nfe_steps=args.nfe_steps,
     )
-    sem = asyncio.Semaphore(args.max_concurrent)
+    sem = asyncio.Semaphore(args.max_concurrent)  # TODO: more than 1 is broken
 
     uri = f"tcp://{args.host}:{args.port}"
     server = AsyncServer.from_uri(uri)

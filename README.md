@@ -1,4 +1,8 @@
-# Thai TTS (TH TTS)
+# THTTS (Thai TTS)
+
+This project is the first implementation of Text-to-Speech (TTS) in Thai using the Wyoming protocol, making it fully compatible with Home Assistant. It enables local, streaming Thai voice synthesis for smarter automations and AI assistants—no cloud required.
+
+Bring your local AI to life in Thai language with seamless integration, low latency, and privacy-first design.
 
 ## Model Attribution
 
@@ -71,21 +75,24 @@ You can override other parameters via environment variables (see below).
 
 ## Environment Variables
 
-| Variable              | Default Value                                 | Description                                      |
-|-----------------------|-----------------------------------------------|--------------------------------------------------|
-| `THTTS_BACKEND`       | `VITS`                                        | Model backend: `VITS`, `F5_V1`, or `F5_V2`       |
-| `THTTS_HOST`          | `0.0.0.0`                                     | Bind address                                     |
-| `THTTS_PORT`          | `10200`                                       | Port to listen on                                |
-| `THTTS_LOG_LEVEL`     | `INFO`                                        | Log level (`DEBUG`, `INFO`, etc.)                |
-| `THTTS_MODEL`         | `VIZINTZOR/MMS-TTS-THAI-FEMALEV2`             | VITS model ID                                    |
-| `THTTS_REF_AUDIO`     | `hf_sample`                                   | F5 reference audio path                          |
-| `THTTS_REF_TEXT`      | *(empty)*                                     | F5 reference transcript                          |
-| `THTTS_DEVICE`        | `auto`                                        | `auto`, `cpu`, or `cuda`                         |
-| `THTTS_SPEED`         | `1.0`                                         | F5 speech speed multiplier                       |
-| `THTTS_NFE_STEPS`     | `32`                                          | F5 denoising steps                               |
-| `THTTS_MAX_CONCURRENT`| `1`                                           | Max concurrent synth requests                    |
-| `THTTS_CKPT_FILE`     | *(auto-selected by backend)*                  | F5 checkpoint file path                          |
-| `THTTS_VOCAB_FILE`    | *(auto-selected by backend)*                  | F5 vocab file path                               |
+| Variable                | Default Value                                 | Description                                      |
+|-------------------------|-----------------------------------------------|--------------------------------------------------|
+| `THTTS_BACKEND`         | `VITS`                                        | Model backend: `VITS`, `F5_V1`, or `F5_V2`       |
+| `THTTS_HOST`            | `0.0.0.0`                                     | Bind address                                     |
+| `THTTS_PORT`            | `10200`                                       | Port to listen on                                |
+| `THTTS_LOG_LEVEL`       | `INFO`                                        | Log level (`DEBUG`, `INFO`, etc.)                |
+| `THTTS_MODEL`           | `VIZINTZOR/MMS-TTS-THAI-FEMALEV2`             | VITS model ID                                    |
+| `THTTS_REF_AUDIO`       | `hf_sample`                                   | F5 reference audio path                          |
+| `THTTS_REF_TEXT`        | *(empty)*                                     | F5 reference transcript                          |
+| `THTTS_DEVICE`          | `auto`                                        | `auto`, `cpu`, or `cuda`                         |
+| `THTTS_SPEED`           | `1.0`                                         | F5 speech speed multiplier                       |
+| `THTTS_NFE_STEPS`       | `32`                                          | F5 denoising steps                               |
+| `THTTS_MAX_CONCURRENT`  | `1`                                           | Max concurrent synth requests                    |
+| `THTTS_CKPT_FILE`       | *(auto-selected by backend)*                  | F5 checkpoint file path                          |
+| `THTTS_VOCAB_FILE`      | *(auto-selected by backend)*                  | F5 vocab file path                               |
+| `THTTS_SPEAK_SPEED`     |                                               |                                                  |
+| `THTTS_MAX_WAIT_MS`     |                                               |                                                  |
+| `THTTS_MIN_SENT_CHARS`  |                                               |                                                  |   
 
 
 ## 3. Docker Compose (NVIDIA GPU)

@@ -6,7 +6,7 @@ from f5_tts.infer.utils_infer import (
     nfe_step,
     cfg_strength,
     sway_sampling_coef,
-    speed as default_speed,
+    # speed as default_speed,
     fix_duration,
     infer_process,
     load_model,
@@ -36,15 +36,34 @@ from pythainlp.tokenize import sent_tokenize
 import argparse
 import asyncio
 import logging
+import os
+import re
+import unicodedata
 from typing import List
 import numpy as np
 
-MIN_CHARS = 48          # flush when buffer reaches this length
-MAX_WAIT_MS = 220       # flush if idle for this many ms
-MAX_SENT_LEN = 180      # if a 'sentence' is too long, treat as complete to avoid stalling
-TERMINATORS = {"।", "?", "!", "…", "\n"}  # Thai often lacks punctuation; timeout/length still cover
-MIN_SENT_CHARS = 15     # do not emit a sentence shorter than this unless final flush
+from util.cleantext import process_thai_repeat, replace_numbers_with_thai
 
+SPEAK_SPEED = float(os.getenv("THTTS_SPEAK_SPEED", "0.8"))        # 0.5x, 1x, 1.5x, 2x
+MIN_CHARS = 48                                                    # flush when buffer reaches this length
+MAX_WAIT_MS = int(os.getenv("THTTS_MAX_WAIT_MS", "220"))          # flush if idle for this many ms
+MAX_SENT_LEN = 180                                                # if a 'sentence' is too long, treat as complete to avoid stalling
+TERMINATORS = {"।", "?", "!", "…", "\n"}                          # Thai often lacks punctuation; timeout/length still cover
+MIN_SENT_CHARS = int(os.getenv("THTTS_MIN_SENT_CHARS", "15"))     # do not emit a sentence shorter than this unless final flush
+EMOJI_PATTERN = re.compile(
+    "["                       # Common emoji blocks + variation selectors
+    "\U0001F300-\U0001F6FF"   # Misc Symbols and Pictographs, Transport & Map
+    "\U0001F900-\U0001F9FF"   # Supplemental Symbols and Pictographs
+    "\U0001FA70-\U0001FAFF"   # Symbols and Pictographs Extended-A
+    "\u2600-\u27BF"           # Misc symbols
+    "\uFE0E\uFE0F"            # variation selectors
+    "]+",
+    flags=re.UNICODE
+)
+CONTROL_PATTERN = re.compile(r"[\u0000-\u001F\u007F]")
+ZW_PATTERN = re.compile(r"[\u200B-\u200D\u2060]")  # zero-width chars
+MULTISPACE = re.compile(r"[ \t\u00A0]{2,}")
+THAI_SENT_END = re.compile(r"([\.!\?…]|[\u0E2F])")  # ., !, ?, …, ฯ
 
 # -----------------------
 # Utils
@@ -57,9 +76,37 @@ def float32_to_int16_pcm(x: np.ndarray) -> bytes:
     return x16.tobytes()
 
 
+def normalize_thai_text(text: str) -> str:
+    """
+    Conservative normalization aligned with F5-TTS-THAI WebUI:
+      - NFC normalize
+      - unify common quotes/dashes
+      - strip emoji, zero-width & control chars
+      - collapse excessive whitespace
+    """
+    if not text:
+        return ""
+    t = unicodedata.normalize("NFC", text)
+    t = t.replace("“", "\"").replace("”", "\"").replace("’", "'").replace("‘", "'")
+    t = t.replace("–", "-").replace("—", "-")
+    t = EMOJI_PATTERN.sub("", t)
+    t = ZW_PATTERN.sub("", t)
+    t = CONTROL_PATTERN.sub("", t)
+    t = MULTISPACE.sub(" ", t)
+    return t.strip()
+
+
+def preprocess_thai(text: str) -> str:
+    """Full Thai preprocessing (normalize + optional Thai-digit mapping)."""
+    t = replace_numbers_with_thai(text)
+    t = process_thai_repeat(t)
+    t = normalize_thai_text(t)
+    return t
+
+
 def split_sentences_th(text: str) -> List[str]:
     splitted = sent_tokenize(text, keep_whitespace=False, engine="thaisum")
-    logging.debug(f"Splitted sentences to: len={len(splitted)} {splitted}")
+    # logging.debug(f"Splitted sentences to: len={len(splitted)} {splitted}")
     return splitted
 
 
@@ -112,7 +159,7 @@ def _split_ready_vs_tail(text: str, *, final: bool = False) -> tuple[list[str], 
 
     # single sentence
     s = sents[0]
-    if s and (s[-1] in TERMINATORS or len(s) >= MAX_SENT_LEN or final):
+    if s and (s[-1] in TERMINATORS or len(s) >= MAX_SENT_LEN or final or len(s) >= MIN_CHARS):
         # Only emit if it's long enough, unless final=True
         if final or len(s) >= MIN_SENT_CHARS:
             return [s], ""
@@ -139,7 +186,7 @@ class ThaiF5Engine:
         ref_audio: str | None,
         ref_text: str | None,
         device: str = "auto",
-        speed: float = default_speed,
+        speed: float = SPEAK_SPEED,
         nfe_steps: int = nfe_step,
     ):
         # Resolve device
@@ -235,6 +282,12 @@ class ThaiF5Handler(AsyncEventHandler):
         self.sem = sem
         self._buf: list[str] = []   # list of chunk strings
         self._flush_task = None     # asyncio.Task or None
+        # Single audio stream per request (low-latency continuous playback)
+        self._audio_started = False
+        self._rate = self.engine.sr
+        self._width = 2
+        self._channels = 1
+        self._chunk_samples = int(self.engine.sr * 0.2) or 1  # ~200ms per chunk
         peer = getattr(self, "writer", None)
         try:
             addr = peer.get_extra_info("peername") if peer else None
@@ -296,28 +349,39 @@ class ThaiF5Handler(AsyncEventHandler):
                     logging.debug("Ignoring legacy one-shot 'synthesize' (streaming already in progress/done)")
                     return True
                 syn: Synthesize = Synthesize.from_event(event)
-                text = (syn.text or "").strip()
+                text = preprocess_thai(syn.text or "")
                 logging.info("Synthesize (oneshot): %r", text)
-                await self._speak_text(text)
+                await self._speak_text(text, standalone=True)
                 return True
 
             if SynthesizeStart.is_type(event.type):
                 self._streaming = True
                 self._reset_buffer()
+                self._audio_started = False
                 logging.info("Synthesize streaming START: %s", event)
+                # Prime playback immediately so the player opens.
+                await self._ensure_audio_started()
+                import numpy as _np
+                _sil = _np.zeros(int(self._rate * 0.12), dtype=_np.float32)  # ~120 ms
+                await self.write_event(AudioChunk(
+                    rate=self._rate, width=self._width, channels=self._channels,
+                    audio=float32_to_int16_pcm(_sil)
+                ).event())
                 return True
 
             if SynthesizeChunk.is_type(event.type):
                 chunk = SynthesizeChunk.from_event(event)
-                text = (chunk.text or "").strip()
-                if not text:
+                # IMPORTANT: do NOT normalize/strip here.
+                # We must preserve '\n' so the sentence splitter can use it.
+                text = chunk.text or ""
+                if text == "":
                     logging.debug("Empty chunk")
                     return True
 
                 # Accumulate
                 self._buf.append(text)
                 buf_str = "".join(self._buf)
-                logging.debug("Accumulated chunk; buffer_len=%d (just got: %r)", len(buf_str), text)
+                # logging.debug("Accumulated chunk; buffer_len=%d (just got: %r)", len(buf_str), text)
 
                 # Peek at sentence segmentation to see if we have a *complete* sentence
                 sents = split_sentences_th(buf_str)
@@ -338,6 +402,10 @@ class ThaiF5Handler(AsyncEventHandler):
                 logging.info("Synthesize streaming STOP")
                 # Flush any remaining text first
                 await self._flush_buffer(force_all=True)
+                # Close the single audio stream if we opened it
+                if self._audio_started:
+                    await self.write_event(AudioStop().event())
+                    self._audio_started = False
                 await self.write_event(SynthesizeStopped().event())
                 self._streaming = False
                 return True
@@ -351,32 +419,46 @@ class ThaiF5Handler(AsyncEventHandler):
             await self.write_event(Error(text=f"Server error: {e}").event())
         return False
 
-    async def _speak_text(self, text: str):
+    async def _ensure_audio_started(self):
+        if not self._audio_started:
+            await self.write_event(AudioStart(rate=self._rate, width=self._width, channels=self._channels).event())
+            self._audio_started = True
+
+    async def _speak_text(self, text: str, *, standalone: bool = False):
         if not text:
             logging.debug("Empty text; skip speak")
             return
-        rate, width, channels = self.engine.sr, 2, 1  # 16-bit, mono
-        logging.debug("AudioStart: rate=%d width=%d channels=%d", rate, width, channels)
-        # Make sure no pending idle task fires mid-speak
+        rate, width, channels = self._rate, self._width, self._channels
+        # Make sure no pending idle task fires mid-speak (streaming path)
         if self._flush_task and not self._flush_task.done():
             self._flush_task.cancel()
             self._flush_task = None
-        await self.write_event(AudioStart(rate=rate, width=width, channels=channels).event())
+        # Preprocess fully (incl. digit mapping) right before synth
+        text = preprocess_thai(text)
+        logging.debug(f"Preprocessed text: {text}")
+
+        if standalone:
+            # one-shot mode: its own AudioStart/Stop
+            await self.write_event(AudioStart(rate=rate, width=width, channels=channels).event())
+        else:
+            # streaming mode: ensure single AudioStart
+            await self._ensure_audio_started()
 
         loop = asyncio.get_running_loop()
         async with self.sem:
             wav = await loop.run_in_executor(None, self.engine.synth_blocking, text)
 
-        samples_per_chunk = int(self.engine.sr * 0.2) or 1  # ~200 ms per chunk
         total_bytes = 0
-        for i in range(0, len(wav), samples_per_chunk):
-            chunk = wav[i:i + samples_per_chunk]
+        for i in range(0, len(wav), self._chunk_samples):
+            chunk = wav[i:i + self._chunk_samples]
             payload = float32_to_int16_pcm(chunk)
             total_bytes += len(payload)
             await self.write_event(AudioChunk(rate=rate, width=width, channels=channels, audio=payload).event())
-        await self.write_event(AudioStop().event())
-        logging.info("Streamed audio: text_len=%d samples=%d bytes=%d",
-                     len(text), len(wav), total_bytes)
+        if standalone:
+            await self.write_event(AudioStop().event())
+
+        logging.info("Streamed audio chunk(s): text_len=%d samples=%d bytes=%d standalone=%s",
+                     len(text), len(wav), total_bytes, standalone)
 
     def _reset_buffer(self):
         self._buf = []
@@ -400,7 +482,12 @@ class ThaiF5Handler(AsyncEventHandler):
                 return
             buf_str = "".join(self._buf)
             sents = split_sentences_th(buf_str)
-            if len(sents) >= 2 or (buf_str and buf_str[-1] in TERMINATORS) or len(buf_str) >= MAX_SENT_LEN:
+            if (
+                len(sents) >= 2
+                or (buf_str and buf_str[-1] in TERMINATORS)
+                or len(buf_str) >= MAX_SENT_LEN
+                or len(buf_str) >= MIN_CHARS
+            ):
                 await self._flush_buffer()
             else:
                 # Not ready yet; re-arm the timer to check again later.
@@ -439,7 +526,7 @@ class ThaiF5Handler(AsyncEventHandler):
             # Move tail back to buffer BEFORE we speak, so any concurrent timer sees only the tail
             self._buf = [tail] if tail else []
             for sentence in ready_sents:
-                await self._speak_text(sentence)
+                await self._speak_text(sentence, standalone=False)
 
         else:
             # No ready sentences; keep the current buffer as-is
@@ -462,7 +549,7 @@ async def main():
     ap.add_argument("--ref-audio", default="hf_sample", help='Reference voice audio path. Use "hf_sample" to use the model’s bundled sample.')
     ap.add_argument("--ref-text", default=None, help="Transcript for the reference audio. If omitted with a local file, ASR may be attempted.")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    ap.add_argument("--speed", type=float, default=default_speed, help="Speech speed multiplier.")
+    ap.add_argument("--speed", type=float, default=SPEAK_SPEED, help="Speech speed multiplier.")
     ap.add_argument("--nfe-steps", type=int, default=nfe_step, help="Denoising steps.")
     ap.add_argument("--max-concurrent", type=int, default=1, help="Legacy params, do not change")
 

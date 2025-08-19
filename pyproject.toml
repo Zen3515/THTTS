@@ -9,6 +9,7 @@ dependencies = [
     "f5-tts",
     "omegaconf",
     "pythainlp>=5.1.2",
+    "python-crfsuite>=0.9.11",
     "torch>=2.8.0",
     "torchaudio",
     "transformers>=4.55.2",

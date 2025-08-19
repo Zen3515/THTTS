@@ -40,9 +40,11 @@ import os
 import re
 import unicodedata
 from typing import List
+from functools import partial
 import numpy as np
 
 from util.cleantext import process_thai_repeat, replace_numbers_with_thai
+from util.custom_infer import custom_infer_process
 
 SPEAK_SPEED = float(os.getenv("THTTS_SPEAK_SPEED", "0.8"))        # 0.5x, 1x, 1.5x, 2x
 MIN_CHARS = 48                                                    # flush when buffer reaches this length
@@ -214,6 +216,17 @@ class ThaiF5Engine:
             F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, text_mask_padding=True, conv_layers=4, pe_attn_head=None)
         self.model = load_model(DiT, F5TTS_model_cfg, self.ckpt_file, vocab_file=self.vocab_file, use_ema=True)
 
+        # Choose infer function once
+        if model_version == "v2":
+            # Pre-fill the v2-only params so the call site doesn’t change
+            self._infer = partial(
+                custom_infer_process,
+                use_ipa=True,
+                # set_max_chars=self.set_max_chars,
+            )
+        else:
+            self._infer = infer_process  # original
+
         # Reference audio/text (voice prompt)
         if not ref_audio or ref_audio == "hf_sample":
             self.ref_audio = str(cached_path("hf://VIZINTZOR/F5-TTS-THAI/sample/ref_audio.wav"))
@@ -240,12 +253,7 @@ class ThaiF5Engine:
             return np.zeros(0, dtype=np.float32)
         logging.debug("Synth start (blocking): %r", text)
 
-        result = infer_process(
-            self.ref_audio_p,
-            self.ref_text_p,
-            text,
-            self.model,
-            self.vocoder,
+        common_kwargs = dict(
             mel_spec_type=mel_spec_type,
             target_rms=target_rms,
             cross_fade_duration=cross_fade_duration,
@@ -254,6 +262,16 @@ class ThaiF5Engine:
             sway_sampling_coef=sway_sampling_coef,
             speed=self.speed,
             fix_duration=fix_duration,
+            device=self.device,
+        )
+
+        result = self._infer(
+            self.ref_audio_p,
+            self.ref_text_p,
+            text,
+            self.model,
+            self.vocoder,
+            **common_kwargs,  # type: ignore
         )
         if len(result) == 3:
             audio, sr, _ = result

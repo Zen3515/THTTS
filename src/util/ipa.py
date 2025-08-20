@@ -9,7 +9,7 @@ from langdetect import detect
 from phonemizer import phonemize
 from pythainlp.util import expand_maiyamok
 
-from raw_dict import NUMBER2PHONE_DICT, THAI2PHONE_DICT, PHONE2IPA, PHONE2HAAS, PHONE2RTGS, PHONE2RTGS_CODA, HAAS2PHONE
+from .raw_dict import NUMBER2PHONE_DICT, THAI2PHONE_DICT, PHONE2IPA, PHONE2HAAS, PHONE2RTGS, PHONE2RTGS_CODA, HAAS2PHONE
 
 
 def eng_ipa(text):

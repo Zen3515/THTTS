@@ -1,5 +1,5 @@
-from number import NUMBER2PHONE_DICT
-from word import THAI2PHONE_DICT
+from .number import NUMBER2PHONE_DICT
+from .word import THAI2PHONE_DICT
 
 
 PHONE2IPA = {

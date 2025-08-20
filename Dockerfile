@@ -3,7 +3,7 @@ FROM python:3.10-slim AS base
 COPY --from=ghcr.io/astral-sh/uv:0.8.11 /uv /uvx /bin/
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tini curl ca-certificates xz-utils \
+    tini curl ca-certificates xz-utils espeak \
  && rm -rf /var/lib/apt/lists/*
 
 ARG FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-gpl-7.1.tar.xz

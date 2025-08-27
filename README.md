@@ -92,8 +92,37 @@ You can override other parameters via environment variables (see below).
 | `THTTS_VOCAB_FILE`      | *(auto-selected by backend)*                  | F5 vocab file path                               |
 | `THTTS_SPEAK_SPEED`     |                                               |                                                  |
 | `THTTS_MAX_WAIT_MS`     |                                               |                                                  |
-| `THTTS_MIN_SENT_CHARS`  |                                               |                                                  |   
+| `THTTS_MIN_SENT_CHARS`  |                                               |                                                  |
+| `THTTS_VOICES_YAML`     |                                               | Voices List YAML (For multiple voice support) (see [#voice-list-file])    |
 
+### Voices List yaml File
+
+You can specify `THTTS_VOICES_YAML` to the path containning the following to support multiple voice at the same time
+
+```yaml
+- name: default
+  attribution:
+    name: VIZINTZOR/F5-TTS-THAI
+    url: https://huggingface.co/VIZINTZOR/F5-TTS-THAI
+  languages: ["th", "th-TH"]
+  description: Default Original
+  installed: true
+  version: "1.0"
+  ref_sound_path: /mnt/data/services/thtts/ref_sound/original__ฉันเดินทางไปเที่ยวที่จังหวัดเชียงใหม่ในช่วงฤดูหนาวเพื่อสัมผัสอากาศเย็นสบาย.wav
+  ref_sound_sentence: ฉันเดินทางไปเที่ยวที่จังหวัดเชียงใหม่ในช่วงฤดูหนาวเพื่อสัมผัสอากาศเย็นสบาย
+
+- name: meme
+  attribution:
+    name: VIZINTZOR/F5-TTS-THAI
+    url: https://huggingface.co/VIZINTZOR/F5-TTS-THAI
+  languages: ["th", "th-TH"]
+  description: meme Female
+  installed: true
+  version: "1.0"
+  ref_sound_path: /mnt/data/services/thtts/ref_sound/meme__ชั้นเดินทางไปเที่ยวที่จังหวัดเชียงใหม่ในช่วงฤดูหนาวเพื่อสัมผัสอากาศเย็นสบาย.mp3
+  ref_sound_sentence: ชั้นเดินทางไปเที่ยวที่จังหวัดเชียงใหม่ในช่วงฤดูหนาวเพื่อสัมผัสอากาศเย็นสบาย
+
+```
 
 ## 3. Docker Compose (NVIDIA GPU)
 

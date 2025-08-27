@@ -39,8 +39,9 @@ import logging
 import os
 import re
 import unicodedata
-from typing import List
+from typing import Any, List
 from functools import partial
+from dataclasses import dataclass
 import numpy as np
 
 from util.cleantext import process_thai_repeat, replace_numbers_with_thai
@@ -171,14 +172,46 @@ def _split_ready_vs_tail(text: str, *, final: bool = False) -> tuple[list[str], 
     return [], s
 
 
+@dataclass(kw_only=True)
+class TtsVoiceWithRef(TtsVoice):
+    """Text-to-speech voice. with ref_sound_path"""
+    ref_sound_path: str
+    ref_sound_sentence: str
+
 # -----------------------
 # F5-TTS Thai Engine
 # -----------------------
+
+
 class ThaiF5Engine:
     """
     Wraps F5-TTS (DiT + vocos) with Thai finetuned checkpoint.
     Produces 24 kHz mono float32 waveform via infer_process().
     """
+    DEFAULT_VOICE_LIST = [
+        TtsVoice(
+            name="thai-default",
+            attribution=Attribution(
+                name="VIZINTZOR/F5-TTS-THAI",
+                url="https://huggingface.co/VIZINTZOR/F5-TTS-THAI",
+            ),
+            languages=["th", "th-TH"],
+            description="Thai female (F5-TTS finetune)",
+            installed=True,
+            version="1.0",
+        ),
+        TtsVoice(
+            name="default",
+            attribution=Attribution(
+                name="VIZINTZOR/F5-TTS-THAI",
+                url="https://huggingface.co/VIZINTZOR/F5-TTS-THAI",
+            ),
+            languages=["th", "th-TH"],
+            description="Alias of thai-default",
+            installed=True,
+            version="1.0",
+        ),
+    ]
 
     def __init__(
         self,
@@ -190,6 +223,7 @@ class ThaiF5Engine:
         device: str = "auto",
         speed: float = SPEAK_SPEED,
         nfe_steps: int = nfe_step,
+        voices_yaml: str | None = None,
     ):
         # Resolve device
         if device == "auto":
@@ -200,7 +234,9 @@ class ThaiF5Engine:
         # Hugging Face repo: VIZINTZOR/F5-TTS-THAI (model_1000000.pt, vocab.txt, sample/ref_audio.wav)
         self.ckpt_file = str(cached_path(ckpt_file or "hf://VIZINTZOR/F5-TTS-THAI/model_1000000.pt"))
         self.vocab_file = str(cached_path(vocab_file or "hf://VIZINTZOR/F5-TTS-THAI/vocab.txt"))
-
+        self.voices_yaml = voices_yaml
+        self.processed_voices: dict[str, dict[str, Any]] = {}
+        self.voices_list: list[TtsVoice] = self.load_voice_yaml()  # pyright: ignore[reportAttributeAccessIssue]
         # Model base config from f5_tts package
         # model_cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../resources/F5-TTS-THAI/F5TTS_Base_train.yaml')
         # model_cfg = OmegaConf.load(model_cfg_path).model.arch
@@ -245,6 +281,40 @@ class ThaiF5Engine:
         # F5-TTS + vocos emit 24 kHz mono
         self.sr = 24000
         logging.info("Engine ready: device=%s sr=%d", self.device, self.sr)
+
+    def load_voice_yaml(self):
+        if not self.voices_yaml:
+            return ThaiF5Engine.DEFAULT_VOICE_LIST
+
+        try:
+            import yaml
+            with open(self.voices_yaml, "r", encoding="utf-8") as f:
+                raw = yaml.safe_load(f)
+        except Exception as err:
+            logging.warning(f"Failed to read voices yaml at {self.voices_yaml}: {err}")
+            return ThaiF5Engine.DEFAULT_VOICE_LIST
+        if not isinstance(raw, list):
+            logging.warning(f"Voices yaml must be a list at top-level, got {type(raw).__name__}")
+            return ThaiF5Engine.DEFAULT_VOICE_LIST
+
+        validated: list[TtsVoiceWithRef] = []
+        for i, v in enumerate(raw):
+            try:
+                parsedVoice: TtsVoiceWithRef = TtsVoiceWithRef.from_dict(v)
+                validated.append(parsedVoice)
+                ref_audio_p, ref_text_p = preprocess_ref_audio_text(parsedVoice.ref_sound_path, parsedVoice.ref_sound_sentence)
+                self.processed_voices[parsedVoice.name] = {
+                    "ref_audio_p": ref_audio_p,
+                    "ref_text_p": ref_text_p,
+                }
+                logging.debug(f"Loaded #{i}: {parsedVoice.name} in {self.voices_yaml}")
+            except Exception as e:
+                logging.warning(f"Invalid voice entry #{i} in {self.voices_yaml}: {e}")
+        if not validated:
+            logging.warning(f"No valid voices found in {self.voices_yaml}; using DEFAULT_VOICE_LIST")
+            return ThaiF5Engine.DEFAULT_VOICE_LIST
+
+        return validated
 
     @torch.inference_mode()
     def synth_blocking(self, text: str) -> np.ndarray:
@@ -327,30 +397,7 @@ class ThaiF5Handler(AsyncEventHandler):
                                 name="VIZINTZOR/F5-TTS-THAI",
                                 url="https://huggingface.co/VIZINTZOR/F5-TTS-THAI",
                             ),
-                            voices=[
-                                TtsVoice(
-                                    name="thai-default",
-                                    attribution=Attribution(
-                                        name="VIZINTZOR/F5-TTS-THAI",
-                                        url="https://huggingface.co/VIZINTZOR/F5-TTS-THAI",
-                                    ),
-                                    languages=["th", "th-TH"],
-                                    description="Thai female (F5-TTS finetune)",
-                                    installed=True,
-                                    version="1.0",
-                                ),
-                                TtsVoice(
-                                    name="default",
-                                    attribution=Attribution(
-                                        name="VIZINTZOR/F5-TTS-THAI",
-                                        url="https://huggingface.co/VIZINTZOR/F5-TTS-THAI",
-                                    ),
-                                    languages=["th", "th-TH"],
-                                    description="Alias of thai-default",
-                                    installed=True,
-                                    version="1.0",
-                                ),
-                            ],
+                            voices=self.engine.voices_list,
                             installed=True,
                             description="Thai TTS via F5-TTS (DiT + vocos, 24 kHz)",
                             version="1.0",
@@ -377,6 +424,17 @@ class ThaiF5Handler(AsyncEventHandler):
                 self._reset_buffer()
                 self._audio_started = False
                 logging.info("Synthesize streaming START: %s", event)
+                # Event(type='synthesize-start', data={'voice': {'name': 'default'}}, payload=None)
+                try:
+                    voice_name = event.data.get('voice', {}).get('name', "")
+                    target_voice_dict = self.engine.processed_voices.get(voice_name, None)
+                    if target_voice_dict is not None:
+                        self.engine.ref_audio_p = target_voice_dict.get("ref_audio_p")
+                        self.engine.ref_text_p = target_voice_dict.get("ref_text_p")
+                        logging.info("Voice switched to: %s", voice_name)
+                except Exception as err:
+                    logging.warning(f"Voice was not selected: {err}")
+
                 # Prime playback immediately so the player opens.
                 await self._ensure_audio_started()
                 import numpy as _np
@@ -570,7 +628,7 @@ async def main():
     ap.add_argument("--speed", type=float, default=SPEAK_SPEED, help="Speech speed multiplier.")
     ap.add_argument("--nfe-steps", type=int, default=nfe_step, help="Denoising steps.")
     ap.add_argument("--max-concurrent", type=int, default=1, help="Legacy params, do not change")
-
+    ap.add_argument("--voices-yaml", default=None, help="Path to voices.yaml defining available TTS voices/programs.")
     ap.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = ap.parse_args()
 
@@ -590,6 +648,7 @@ async def main():
         device=args.device,
         speed=args.speed,
         nfe_steps=args.nfe_steps,
+        voices_yaml=args.voices_yaml,
     )
     sem = asyncio.Semaphore(args.max_concurrent)  # TODO: more than 1 is broken
 

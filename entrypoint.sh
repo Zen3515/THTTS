@@ -18,6 +18,7 @@ set -Eeuo pipefail
 : "${THTTS_MAX_CONCURRENT:=1}"
 : "${THTTS_CKPT_FILE:=}"            # optional override
 : "${THTTS_VOCAB_FILE:=}"           # optional override
+: "${THTTS_VOICES_YAML:=}"          # optional voices.yaml path
 
 BACKEND="${THTTS_BACKEND:-VITS}"
 BACKEND_UPPER="$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')"
@@ -62,6 +63,9 @@ run_f5 () {
   # Only pass --ref-text if provided (avoid empty string ambiguity)
   if [[ -n "${THTTS_REF_TEXT}" ]]; then
     args+=( --ref-text "${THTTS_REF_TEXT}" )
+  fi
+  if [[ -n "${THTTS_VOICES_YAML}" ]]; then
+    args+=( --voices-yaml "${THTTS_VOICES_YAML}" )
   fi
 
   exec uv run python src/wyoming_thai_f5.py "${args[@]}"

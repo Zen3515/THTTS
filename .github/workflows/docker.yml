@@ -31,25 +31,55 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
+      - name: Set image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata (default image)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ steps.image.outputs.name }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
+      - name: Extract metadata (CUDA 12.6 / Pascal image)
+        id: meta_pascal
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch,suffix=-cuda126-sm61
+            type=ref,event=tag,suffix=-cuda126-sm61
+            type=sha,suffix=-cuda126-sm61
+            type=raw,value=cuda126-sm61,enable={{is_default_branch}}
+            type=raw,value=pascal,enable={{is_default_branch}}
+
+      - name: Build and push default image
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile
           push: true
           # Build both amd64 and arm64 (change if you only need one)
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=default
+          cache-to: type=gha,scope=default,mode=max
+
+      - name: Build and push CUDA 12.6 / Pascal image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.cuda126-sm61
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta_pascal.outputs.tags }}
+          labels: ${{ steps.meta_pascal.outputs.labels }}
+          cache-from: type=gha,scope=cuda126-sm61
+          cache-to: type=gha,scope=cuda126-sm61,mode=max

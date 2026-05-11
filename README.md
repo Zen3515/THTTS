@@ -129,7 +129,8 @@ You can specify `THTTS_VOICES_YAML` to the path containning the following to sup
 Use `ghcr.io/zen3515/thtts:latest` for the default image. For Pascal GPUs such
 as GTX 1080 (`sm_61`), use `ghcr.io/zen3515/thtts:cuda126-sm61` or
 `ghcr.io/zen3515/thtts:pascal`; that image is `linux/amd64` only and installs
-the PyTorch CUDA 12.6 wheels that include `sm_61` support.
+the PyTorch CUDA 12.6 wheels that include `sm_60`, which is binary-compatible
+with desktop `sm_61` GPUs.
 
 ```yaml
 services:

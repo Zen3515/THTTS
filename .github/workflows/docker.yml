@@ -1,22 +1,39 @@
-name: Build & Push Docker (GHCR)
+name: Release
 
 on:
   push:
-    branches: [main] # change if your default branch is different
-    tags: ["v*.*.*"] # semver tags trigger a release image
-  workflow_dispatch: # allow manual run
+    tags:
+      - "v*.*.*"
 
 permissions:
-  contents: read
-  packages: write # required to push to GHCR
+  contents: write
+  packages: write
 
 jobs:
-  docker:
+  release:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag '${tag}' is invalid. Expected format: v1.2.3" >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=${tag}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Set up QEMU (for multi-arch)
         uses: docker/setup-qemu-action@v3
@@ -42,10 +59,8 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.tag }}
+            type=raw,value=latest
 
       - name: Extract metadata (CUDA 12.6 / Pascal image)
         id: meta_pascal
@@ -53,13 +68,13 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
-            type=ref,event=branch,suffix=-cuda126-sm61
-            type=ref,event=tag,suffix=-cuda126-sm61
-            type=sha,suffix=-cuda126-sm61
-            type=raw,value=cuda126-sm61,enable={{is_default_branch}}
-            type=raw,value=pascal,enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.tag }}-cuda126-sm61
+            type=raw,value=cuda126-sm61
+            type=raw,value=pascal
 
       - name: Build and push default image
+        id: build_default_1
+        continue-on-error: true
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -71,8 +86,28 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=default
           cache-to: type=gha,scope=default,mode=max
+          provenance: false
+          sbom: false
+
+      - name: Retry build and push default image
+        id: build_default_2
+        if: steps.build_default_1.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=default
+          cache-to: type=gha,scope=default,mode=max
+          provenance: false
+          sbom: false
 
       - name: Build and push CUDA 12.6 / Pascal image
+        id: build_pascal_1
+        continue-on-error: true
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -83,3 +118,37 @@ jobs:
           labels: ${{ steps.meta_pascal.outputs.labels }}
           cache-from: type=gha,scope=cuda126-sm61
           cache-to: type=gha,scope=cuda126-sm61,mode=max
+          provenance: false
+          sbom: false
+
+      - name: Retry build and push CUDA 12.6 / Pascal image
+        id: build_pascal_2
+        if: steps.build_pascal_1.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.cuda126-sm61
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta_pascal.outputs.tags }}
+          labels: ${{ steps.meta_pascal.outputs.labels }}
+          cache-from: type=gha,scope=cuda126-sm61
+          cache-to: type=gha,scope=cuda126-sm61,mode=max
+          provenance: false
+          sbom: false
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          body: |
+            Container release for `${{ steps.version.outputs.tag }}`.
+
+            Published packages:
+            - `${{ steps.image.outputs.name }}:${{ steps.version.outputs.tag }}`
+            - `${{ steps.image.outputs.name }}:latest`
+            - `${{ steps.image.outputs.name }}:${{ steps.version.outputs.tag }}-cuda126-sm61`
+            - `${{ steps.image.outputs.name }}:cuda126-sm61`
+            - `${{ steps.image.outputs.name }}:pascal`

@@ -27,7 +27,7 @@ RUN uv sync --frozen --no-dev \
       --index-url https://download.pytorch.org/whl/cu126 \
       "torch==2.8.0" \
       "torchaudio==2.8.0" \
- && .venv/bin/python -c "import torch; arches = torch._C._cuda_getArchFlags().split(); assert torch.version.cuda == '12.6', torch.version.cuda; assert 'sm_61' in arches, f'Expected sm_61 support, got {arches}'; print(f'torch={torch.__version__} cuda={torch.version.cuda} arches={arches}')" \
+ && .venv/bin/python -c "import torch; arches = torch._C._cuda_getArchFlags().split(); assert torch.version.cuda == '12.6', torch.version.cuda; assert 'sm_61' in arches or 'sm_60' in arches, f'Expected sm_61 support via sm_61 or binary-compatible sm_60, got {arches}'; print(f'torch={torch.__version__} cuda={torch.version.cuda} arches={arches}')" \
  && uv pip check --python .venv/bin/python
 
 COPY . .

@@ -10,103 +10,100 @@ permissions:
   packages: write
 
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-latest
-
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      image: ${{ steps.image.outputs.name }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Validate release tag
         id: version
         shell: bash
         run: |
           set -euo pipefail
-
           tag="${GITHUB_REF_NAME}"
           if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Tag '${tag}' is invalid. Expected format: v1.2.3" >&2
             exit 1
           fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+      - name: Set image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "${GITHUB_OUTPUT}"
 
-          {
-            echo "tag=${tag}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: Set up QEMU (for multi-arch)
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+  build-default:
+    name: Build and push default image
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set image name
-        id: image
-        shell: bash
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-
-      - name: Extract metadata (default image)
-        id: meta
+      - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ steps.image.outputs.name }}
+          images: ${{ needs.prepare.outputs.image }}
           tags: |
-            type=raw,value=${{ steps.version.outputs.tag }}
+            type=raw,value=${{ needs.prepare.outputs.tag }}
             type=raw,value=latest
+      - id: build-1
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=default
+          cache-to: type=gha,scope=default,mode=max
+          provenance: false
+          sbom: false
+      - if: steps.build-1.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=default
+          cache-to: type=gha,scope=default,mode=max
+          provenance: false
+          sbom: false
 
-      - name: Extract metadata (CUDA 12.6 / Pascal image)
-        id: meta_pascal
+  build-cuda126-sm61:
+    name: Build and push CUDA 12.6 / Pascal image
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ steps.image.outputs.name }}
+          images: ${{ needs.prepare.outputs.image }}
           tags: |
-            type=raw,value=${{ steps.version.outputs.tag }}-cuda126-sm61
+            type=raw,value=${{ needs.prepare.outputs.tag }}-cuda126-sm61
             type=raw,value=cuda126-sm61
             type=raw,value=pascal
-
-      - name: Build and push default image
-        id: build_default_1
-        continue-on-error: true
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          # Build both amd64 and arm64 (change if you only need one)
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=default
-          cache-to: type=gha,scope=default,mode=max
-          provenance: false
-          sbom: false
-
-      - name: Retry build and push default image
-        id: build_default_2
-        if: steps.build_default_1.outcome == 'failure'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=default
-          cache-to: type=gha,scope=default,mode=max
-          provenance: false
-          sbom: false
-
-      - name: Build and push CUDA 12.6 / Pascal image
-        id: build_pascal_1
+      - id: build-1
         continue-on-error: true
         uses: docker/build-push-action@v6
         with:
@@ -114,41 +111,41 @@ jobs:
           file: Dockerfile.cuda126-sm61
           push: true
           platforms: linux/amd64
-          tags: ${{ steps.meta_pascal.outputs.tags }}
-          labels: ${{ steps.meta_pascal.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=cuda126-sm61
           cache-to: type=gha,scope=cuda126-sm61,mode=max
           provenance: false
           sbom: false
-
-      - name: Retry build and push CUDA 12.6 / Pascal image
-        id: build_pascal_2
-        if: steps.build_pascal_1.outcome == 'failure'
+      - if: steps.build-1.outcome == 'failure'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.cuda126-sm61
           push: true
           platforms: linux/amd64
-          tags: ${{ steps.meta_pascal.outputs.tags }}
-          labels: ${{ steps.meta_pascal.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=cuda126-sm61
           cache-to: type=gha,scope=cuda126-sm61,mode=max
           provenance: false
           sbom: false
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+  release:
+    needs: [prepare, build-default, build-cuda126-sm61]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: ${{ steps.version.outputs.tag }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
           generate_release_notes: true
           body: |
-            Container release for `${{ steps.version.outputs.tag }}`.
+            Container release for `${{ needs.prepare.outputs.tag }}`.
 
             Published packages:
-            - `${{ steps.image.outputs.name }}:${{ steps.version.outputs.tag }}`
-            - `${{ steps.image.outputs.name }}:latest`
-            - `${{ steps.image.outputs.name }}:${{ steps.version.outputs.tag }}-cuda126-sm61`
-            - `${{ steps.image.outputs.name }}:cuda126-sm61`
-            - `${{ steps.image.outputs.name }}:pascal`
+            - `${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.tag }}`
+            - `${{ needs.prepare.outputs.image }}:latest`
+            - `${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.tag }}-cuda126-sm61`
+            - `${{ needs.prepare.outputs.image }}:cuda126-sm61`
+            - `${{ needs.prepare.outputs.image }}:pascal`

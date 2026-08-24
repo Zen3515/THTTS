@@ -1,21 +1,30 @@
-FROM python:3.10-slim AS base
+FROM python:3.10-slim AS ffmpeg
 
-COPY --from=ghcr.io/astral-sh/uv:0.8.11 /uv /uvx /bin/
-
-ARG FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+ARG FFMPEG_BASE_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
+ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tini ca-certificates curl xz-utils espeak \
  && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
-    curl --fail --location --show-error "$FFMPEG_URL" -o /tmp/ffmpeg.tar.xz; \
+    case "${TARGETARCH:-$(uname -m)}" in \
+      amd64|x86_64) ffmpeg_platform=linux64 ;; \
+      arm64|aarch64) ffmpeg_platform=linuxarm64 ;; \
+      *) echo "Unsupported FFmpeg target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    ffmpeg_url="${FFMPEG_BASE_URL}/ffmpeg-master-latest-${ffmpeg_platform}-gpl.tar.xz"; \
+    curl --fail --location --show-error "$ffmpeg_url" -o /tmp/ffmpeg.tar.xz; \
     mkdir -p /tmp/ffmpeg; \
     tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg --strip-components=1; \
     install -m 0755 /tmp/ffmpeg/bin/ffmpeg /usr/local/bin/ffmpeg; \
     install -m 0755 /tmp/ffmpeg/bin/ffprobe /usr/local/bin/ffprobe; \
     ffmpeg -version; \
     rm -rf /tmp/ffmpeg /tmp/ffmpeg.tar.xz
+
+FROM ffmpeg AS base
+
+COPY --from=ghcr.io/astral-sh/uv:0.8.11 /uv /uvx /bin/
 
 WORKDIR /app
 

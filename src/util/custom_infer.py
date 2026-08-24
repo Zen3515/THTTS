@@ -1,6 +1,10 @@
 # src: https://github.com/VYNCX/F5-TTS-THAI/blob/99b8314f66a14fc2f0a6b53e5122829fbdf9c59c/src/f5_tts/infer/utils_infer.py
 
+import logging
 import re
+from dataclasses import dataclass
+from typing import Any
+
 import tqdm
 import torch
 import numpy as np
@@ -8,12 +12,51 @@ import syllapy
 import torchaudio
 
 from ssg import syllable_tokenize
-from concurrent.futures import ThreadPoolExecutor
 from f5_tts.model.utils import convert_char_to_pinyin
 from f5_tts.infer.utils_infer import target_sample_rate, hop_length, mel_spec_type, target_rms, cross_fade_duration, nfe_step, cfg_strength, sway_sampling_coef, speed, fix_duration, device
 
 
 from util.ipa import any_ipa
+
+
+_LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PreparedReference:
+    """Immutable F5 v2 voice state prepared once during backend startup."""
+
+    audio: Any
+    original_rms: Any
+    ipa_text: str
+
+
+def prepare_reference(
+    ref_audio: str,
+    ref_text: str,
+    *,
+    target_rms: float,
+    device: str,
+) -> PreparedReference:
+    """Load/resample reference audio and convert its fixed transcript once."""
+
+    audio, sample_rate = torchaudio.load(ref_audio)
+    if audio.shape[0] > 1:
+        audio = torch.mean(audio, dim=0, keepdim=True)
+
+    original_rms = torch.sqrt(torch.mean(torch.square(audio)))
+    if original_rms < target_rms:
+        audio = audio * target_rms / original_rms
+    if sample_rate != target_sample_rate:
+        audio = torchaudio.transforms.Resample(sample_rate, target_sample_rate)(audio)
+    if len(ref_text[-1].encode("utf-8")) == 1:
+        ref_text = ref_text + " "
+
+    return PreparedReference(
+        audio=audio.to(device),
+        original_rms=original_rms,
+        ipa_text=any_ipa(ref_text),
+    )
 
 
 def custom_chunk_text(text: str, max_chars=200):
@@ -81,7 +124,7 @@ def custom_infer_process(
     model_obj,
     vocoder,
     mel_spec_type=mel_spec_type,
-    show_info=print,
+    show_info=None,
     progress=tqdm,
     target_rms=target_rms,
     cross_fade_duration=cross_fade_duration,
@@ -92,20 +135,22 @@ def custom_infer_process(
     fix_duration=fix_duration,
     device=device,
     set_max_chars=250,
-    use_ipa=False
+    use_ipa=False,
+    prepared_reference: PreparedReference | None = None,
 ):
     # Split the input text into batches
-    audio, sr = torchaudio.load(ref_audio)
+    reference_audio = None
+    if prepared_reference is None:
+        reference_audio = torchaudio.load(ref_audio)
     # max_chars = int(len(ref_text.encode("utf-8")) / (audio.shape[-1] / sr) * (22 - audio.shape[-1] / sr) * speed)
     gen_text_batches = custom_chunk_text(gen_text, max_chars=set_max_chars)
-    for i, gen_text in enumerate(gen_text_batches):
-        print(f"gen_text {i}", gen_text)
-    print("\n")
-
-    show_info(f"Generating audio in {len(gen_text_batches)} batches...")
+    if show_info is not None:
+        show_info(f"Generating audio in {len(gen_text_batches)} batches...")
+    else:
+        _LOGGER.debug("Generating audio in %d batches", len(gen_text_batches))
     return next(
         custom_infer_batch_process(
-            (audio, sr),
+            reference_audio,
             ref_text,
             gen_text_batches,
             model_obj,
@@ -120,7 +165,8 @@ def custom_infer_process(
             speed=speed,
             fix_duration=fix_duration,
             device=device,
-            use_ipa=use_ipa
+            use_ipa=use_ipa,
+            prepared_reference=prepared_reference,
         )
     )
 
@@ -145,19 +191,25 @@ def custom_infer_batch_process(
     device=None,
     streaming=False,
     chunk_size=2048,
-    use_ipa=False
+    use_ipa=False,
+    prepared_reference: PreparedReference | None = None,
 ):
-    audio, sr = ref_audio
-    if audio.shape[0] > 1:
-        audio = torch.mean(audio, dim=0, keepdim=True)
+    if prepared_reference is None:
+        assert ref_audio is not None
+        audio, sr = ref_audio
+        if audio.shape[0] > 1:
+            audio = torch.mean(audio, dim=0, keepdim=True)
 
-    rms = torch.sqrt(torch.mean(torch.square(audio)))
-    if rms < target_rms:
-        audio = audio * target_rms / rms
-    if sr != target_sample_rate:
-        resampler = torchaudio.transforms.Resample(sr, target_sample_rate)
-        audio = resampler(audio)
-    audio = audio.to(device)
+        rms = torch.sqrt(torch.mean(torch.square(audio)))
+        if rms < target_rms:
+            audio = audio * target_rms / rms
+        if sr != target_sample_rate:
+            resampler = torchaudio.transforms.Resample(sr, target_sample_rate)
+            audio = resampler(audio)
+        audio = audio.to(device)
+    else:
+        audio = prepared_reference.audio
+        rms = prepared_reference.original_rms
 
     generated_waves = []
     spectrograms = []
@@ -172,7 +224,11 @@ def custom_infer_batch_process(
 
         # Prepare the text
         if use_ipa:
-            ref_text_ipa = any_ipa(ref_text)
+            ref_text_ipa = (
+                prepared_reference.ipa_text
+                if prepared_reference is not None
+                else any_ipa(ref_text)
+            )
             gen_text_ipa = any_ipa(gen_text)
             final_text_list = [ref_text_ipa + " " + gen_text_ipa]  # pyright: ignore[reportOperatorIssue]
         else:
@@ -227,14 +283,16 @@ def custom_infer_batch_process(
             for chunk in process_batch(gen_text):
                 yield chunk
     else:
-        with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(process_batch, gen_text) for gen_text in gen_text_batches]
-            for future in progress.tqdm(futures) if progress is not None else futures:
-                result = future.result()
-                if result:
-                    generated_wave, generated_mel_spec = next(result)
-                    generated_waves.append(generated_wave)
-                    spectrograms.append(generated_mel_spec)
+        # The previous ThreadPoolExecutor only constructed generator objects;
+        # model inference still happened serially on ``next(result)`` and the
+        # structure implied unsupported thread safety. Keep the actual serial
+        # behavior explicit for the shared model instance.
+        batches = progress.tqdm(gen_text_batches) if progress is not None else gen_text_batches
+        for gen_text in batches:
+            result = process_batch(gen_text)
+            generated_wave, generated_mel_spec = next(result)
+            generated_waves.append(generated_wave)
+            spectrograms.append(generated_mel_spec)
 
         if generated_waves:
             if cross_fade_duration <= 0:

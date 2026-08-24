@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "uv_lock_sha256": "replace-with-sha256-of-uv.lock",
+  "backends": {
+    "vits": {
+      "device": "cpu",
+      "vits_model": "VIZINTZOR/MMS-TTS-THAI-FEMALEV2",
+      "text": "สวัสดีครับ นี่คือการทดสอบเสียงภาษาไทย",
+      "repeats": 3,
+      "artifacts": {
+        "/secure/model-cache/model.safetensors": "replace-with-artifact-sha256"
+      },
+      "platform": {
+        "system": "Linux",
+        "machine": "x86_64"
+      },
+      "oracle": {
+        "sample_rate": 22050,
+        "byte_stable": false,
+        "sequence_pcm_sha256": [
+          "replace-after-determinism-probe-call-1",
+          "replace-after-determinism-probe-call-2",
+          "replace-after-determinism-probe-call-3"
+        ]
+      }
+    },
+    "f5-v1": {
+      "device": "cpu",
+      "text": "สวัสดีครับ นี่คือการทดสอบเสียงภาษาไทย",
+      "repeats": 3,
+      "f5": {
+        "checkpoint_file": "/secure/f5/model_1000000.pt",
+        "vocab_file": "/secure/f5/vocab.txt",
+        "reference_audio": "/secure/voices/default.wav",
+        "reference_text": "ฉันเดินทางไปเที่ยวที่จังหวัดเชียงใหม่ในช่วงฤดูหนาวเพื่อสัมผัสอากาศเย็นสบาย",
+        "speed": 1.0,
+        "nfe_steps": 32
+      },
+      "artifacts": {
+        "/secure/f5/model_1000000.pt": "replace-with-checkpoint-sha256",
+        "/secure/f5/vocab.txt": "replace-with-vocab-sha256",
+        "/secure/voices/default.wav": "replace-with-reference-sha256"
+      },
+      "oracle": {
+        "sample_rate": 24000,
+        "byte_stable": false,
+        "signal": {
+          "frame_count": [1000, 1000000],
+          "peak": [0.0, 1.0],
+          "rms": [0.0, 1.0],
+          "dc": [-1.0, 1.0],
+          "spectral_centroid_hz": [0.0, 12000.0],
+          "minimum_repeat_correlation": 0.999
+        }
+      }
+    },
+    "f5-v2": {
+      "device": "cpu",
+      "text": "สวัสดีครับ นี่คือการทดสอบเสียงภาษาไทย",
+      "repeats": 3,
+      "f5": {
+        "checkpoint_file": "/secure/f5-v2/model_250000.pt",
+        "vocab_file": "/secure/f5-v2/vocab.txt",
+        "reference_audio": "/secure/voices/default.wav",
+        "reference_text": "ฉันเดินทางไปเที่ยวที่จังหวัดเชียงใหม่ในช่วงฤดูหนาวเพื่อสัมผัสอากาศเย็นสบาย",
+        "speed": 1.0,
+        "nfe_steps": 32
+      },
+      "artifacts": {
+        "/secure/f5-v2/model_250000.pt": "replace-with-checkpoint-sha256",
+        "/secure/f5-v2/vocab.txt": "replace-with-vocab-sha256",
+        "/secure/voices/default.wav": "replace-with-reference-sha256"
+      },
+      "oracle": {
+        "sample_rate": 24000,
+        "byte_stable": false,
+        "signal": {
+          "frame_count": [1000, 1000000],
+          "peak": [0.0, 1.0],
+          "rms": [0.0, 1.0],
+          "dc": [-1.0, 1.0],
+          "spectral_centroid_hz": [0.0, 12000.0],
+          "minimum_repeat_correlation": 0.999
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  non-model:
+    runs-on: ubuntu-latest
+    env:
+      PYTHAINLP_DATA_DIR: /tmp/thtts-pythainlp-data
+      MPLCONFIGDIR: /tmp/thtts-matplotlib
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv lock --check
+      - run: uv sync --frozen --group dev
+      - run: uv run ruff check src/thtts tests
+      - run: uv run pytest -q
+      - run: uv build
